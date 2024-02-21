@@ -10,7 +10,7 @@ use crate::{
 };
 use crate::{event::Callback, Cursive};
 use log::debug;
-use std::{cmp::min, ops::Deref, sync::Arc};
+use std::{cmp::min, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -87,8 +87,8 @@ impl TextArea {
     }
 
     /// Retrieves the content of the view.
-    pub fn get_content(&self) -> &str {
-        &self.content
+    pub fn get_content(&self) -> Arc<String> {
+        Arc::clone(&self.content)
     }
 
     /// Ensures next layout call re-computes the rows.
@@ -174,10 +174,13 @@ impl TextArea {
 
     /// Sets the content of the view.
     pub fn set_content<S: Into<String>>(&mut self, content: S) {
-        self.content = content.into().into();
+        let content = content.into();
+        let len = content.len();
+
+        self.content = Arc::new(content);
 
         // First, make sure we are within the bounds.
-        self.cursor = min(self.cursor, self.content.len());
+        self.cursor = min(self.cursor, len);
 
         // We have no guarantee cursor is now at a correct UTF8 location.
         // So look backward until we find a valid grapheme start.
@@ -409,7 +412,7 @@ impl TextArea {
         let end = self.cursor + len;
         debug!("Start/end: {}/{}", start, end);
         debug!("Content: `{}`", self.content);
-        for _ in self.content.deref().to_string().drain(start..end) {}
+        for _ in Arc::make_mut(&mut self.content).drain(start..end) {}
         debug!("Content: `{}`", self.content);
 
         let selected_row = self.selected_row();
@@ -438,7 +441,7 @@ impl TextArea {
     fn insert(&mut self, ch: char) {
         // First, we inject the data, but keep the cursor unmoved
         // (So the cursor is to the left of the injected char)
-        self.content.deref().to_string().insert(self.cursor, ch);
+        Arc::make_mut(&mut self.content).insert(self.cursor, ch);
 
         // Then, we shift the indexes of every row after this one.
         let shift = ch.len_utf8();
