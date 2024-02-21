@@ -1,3 +1,4 @@
+use crate::Cursive;
 #[allow(deprecated)]
 use crate::{
     direction::Direction,
@@ -9,9 +10,11 @@ use crate::{
     Vec2, {Printer, With, XY},
 };
 use log::debug;
-use std::cmp::min;
+use std::{cmp::min, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+pub type OnEdit = dyn Fn(&mut Cursive, &str, usize) + Send + Sync;
 
 /// Multi-lines text editor.
 ///
@@ -53,6 +56,8 @@ pub struct TextArea {
 
     /// Byte offset of the currently selected grapheme.
     cursor: usize,
+
+    on_edit: Option<Arc<OnEdit>>,
 }
 
 fn make_rows(text: &str, width: usize) -> Vec<Row> {
@@ -75,6 +80,7 @@ impl TextArea {
             size_cache: None,
             last_size: Vec2::zero(),
             cursor: 0,
+            on_edit: None,
         }
         .with(|area| area.compute_rows(Vec2::new(1, 1)))
         // Make sure we have valid rows, even for empty text.
@@ -95,6 +101,48 @@ impl TextArea {
     /// This is a byte index.
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Sets a callback to be called whenever the content is modified.
+    ///
+    /// `callback` will be called with the view
+    /// content and the current cursor position.
+    ///
+    /// This callback can safely trigger itself recursively if needed
+    /// (for instance if you call `on_event` on this view from the callback).
+    ///
+    /// If you need a mutable closure and don't care about the recursive
+    /// aspect, see [`set_on_edit_mut`](#method.set_on_edit_mut).
+    #[crate::callback_helpers]
+    pub fn set_on_edit<F>(&mut self, callback: F)
+    where
+        F: Fn(&mut Cursive, &str, usize) + 'static + Send + Sync,
+    {
+        self.on_edit = Some(Arc::new(callback));
+    }
+
+    /// Sets a callback to be called whenever the content is modified.
+    ///
+    /// Chainable variant. See [`set_on_edit`](#method.set_on_edit).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cursive_core::views::{TextView, TextContent, TextView};
+    /// // Keep the length of the text in a separate view.
+    /// let mut content = TextContent::new("0");
+    /// let text_view = TextView::new_with_content(content.clone());
+    ///
+    /// let on_edit = TextView::new().on_edit(move |_s, text, _cursor| {
+    ///     content.set_content(format!("{}", text.len()));
+    /// });
+    /// ```
+    #[must_use]
+    pub fn on_edit<F>(self, callback: F) -> Self
+    where
+        F: Fn(&mut Cursive, &str, usize) + 'static + Send + Sync,
+    {
+        self.with(|v| v.set_on_edit(callback))
     }
 
     /// Moves the cursor to the given byte position.
