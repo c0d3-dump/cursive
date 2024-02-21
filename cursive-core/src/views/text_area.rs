@@ -1,4 +1,3 @@
-use crate::Cursive;
 #[allow(deprecated)]
 use crate::{
     direction::Direction,
@@ -9,8 +8,9 @@ use crate::{
     view::{CannotFocus, ScrollBase, SizeCache, View},
     Vec2, {Printer, With, XY},
 };
+use crate::{event::Callback, Cursive};
 use log::debug;
-use std::{cmp::min, sync::Arc};
+use std::{cmp::min, ops::Deref, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -36,7 +36,7 @@ pub type OnEdit = dyn Fn(&mut Cursive, &str, usize) + Send + Sync;
 /// ```
 pub struct TextArea {
     // TODO: use a smarter data structure (rope?)
-    content: String,
+    content: Arc<String>,
 
     /// Byte offsets within `content` representing text rows
     ///
@@ -73,7 +73,7 @@ impl TextArea {
     pub fn new() -> Self {
         #[allow(deprecated)]
         TextArea {
-            content: String::new(),
+            content: Arc::new(String::new()),
             rows: Vec::new(),
             enabled: true,
             scrollbase: ScrollBase::new().right_padding(0),
@@ -160,9 +160,21 @@ impl TextArea {
         self.scrollbase.scroll_to(focus);
     }
 
+    fn make_edit_cb(&self) -> Option<Callback> {
+        self.on_edit.clone().map(|cb| {
+            // Get a new Arc on the content
+            let content = Arc::clone(&self.content);
+            let cursor = self.cursor;
+
+            Callback::from_fn(move |s| {
+                cb(s, &content, cursor);
+            })
+        })
+    }
+
     /// Sets the content of the view.
     pub fn set_content<S: Into<String>>(&mut self, content: S) {
-        self.content = content.into();
+        self.content = content.into().into();
 
         // First, make sure we are within the bounds.
         self.cursor = min(self.cursor, self.content.len());
@@ -177,6 +189,8 @@ impl TextArea {
             self.invalidate();
             self.compute_rows(size);
         }
+
+        self.make_edit_cb().unwrap_or_else(Callback::dummy);
     }
 
     /// Sets the content of the view.
@@ -395,7 +409,7 @@ impl TextArea {
         let end = self.cursor + len;
         debug!("Start/end: {}/{}", start, end);
         debug!("Content: `{}`", self.content);
-        for _ in self.content.drain(start..end) {}
+        for _ in self.content.deref().to_string().drain(start..end) {}
         debug!("Content: `{}`", self.content);
 
         let selected_row = self.selected_row();
@@ -417,12 +431,14 @@ impl TextArea {
 
         self.fix_damages();
         debug!("Rows: {:?}", self.rows);
+
+        self.make_edit_cb().unwrap_or_else(Callback::dummy);
     }
 
     fn insert(&mut self, ch: char) {
         // First, we inject the data, but keep the cursor unmoved
         // (So the cursor is to the left of the injected char)
-        self.content.insert(self.cursor, ch);
+        self.content.deref().to_string().insert(self.cursor, ch);
 
         // Then, we shift the indexes of every row after this one.
         let shift = ch.len_utf8();
@@ -438,6 +454,8 @@ impl TextArea {
 
         // Finally, rows may not have the correct width anymore, so fix them.
         self.fix_damages();
+
+        self.make_edit_cb().unwrap_or_else(Callback::dummy);
     }
 
     /// Fix a damage located at the cursor.
@@ -671,7 +689,8 @@ impl View for TextArea {
             self.scrollbase.scroll_to(focus);
         }
 
-        EventResult::Consumed(None)
+        // EventResult::Consumed(None)
+        EventResult::Consumed(self.make_edit_cb())
     }
 
     fn take_focus(&mut self, _: Direction) -> Result<EventResult, CannotFocus> {
