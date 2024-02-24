@@ -7,7 +7,7 @@ use crate::{
     utils::markup::StyledString,
     view::{CannotFocus, IntoBoxedView, Margins, Selector, View, ViewNotFound},
     views::{BoxedView, Button, DummyView, LastSizeView, TextView},
-    Cursive, Printer, Vec2, With,
+    Cursive, Printer, Vec2, With, XY,
 };
 use std::cell::Cell;
 use std::cmp::{max, min};
@@ -17,6 +17,8 @@ use std::cmp::{max, min};
 pub enum DialogFocus {
     /// Content element focused
     Content,
+    /// Popup Content element focused
+    PopupContent,
     /// One of buttons focused
     Button(usize),
 }
@@ -115,6 +117,12 @@ pub struct Dialog {
 
     // `true` when we needs to relayout
     invalidated: bool,
+
+    popup_content: LastSizeView<BoxedView>,
+
+    is_popup_active: bool,
+
+    popup_offset: XY<usize>,
 }
 
 new_default!(Dialog);
@@ -139,6 +147,9 @@ impl Dialog {
             borders: Margins::lrtb(1, 1, 1, 1),
             align: Align::top_right(),
             invalidated: true,
+            popup_content: LastSizeView::new(BoxedView::new(Box::new(DummyView::new()))),
+            is_popup_active: false,
+            popup_offset: XY::new(0, 0),
         }
     }
 
@@ -208,6 +219,28 @@ impl Dialog {
         std::mem::replace(&mut self.content, LastSizeView::new(BoxedView::boxed(view)))
             .view
             .unwrap()
+    }
+
+    /// Sets the popup content of this [`Dialog`].
+    pub fn set_popup_content<V: IntoBoxedView>(
+        &mut self,
+        view: V,
+        pos: XY<usize>,
+    ) -> Box<dyn View> {
+        self.is_popup_active = true;
+        self.popup_offset = pos;
+        std::mem::replace(
+            &mut self.popup_content,
+            LastSizeView::new(BoxedView::boxed(view)),
+        )
+        .view
+        .unwrap()
+    }
+
+    /// remove popup content of this [`Dialog`].
+    pub fn remove_popup_content(&mut self) {
+        self.is_popup_active = false;
+        self.focus = DialogFocus::Content;
     }
 
     /// Convenient method to create a dialog with a simple text content.
@@ -510,6 +543,7 @@ impl Dialog {
                 }
                 DialogFocus::Button(min(c, self.buttons.len() - 1))
             }
+            DialogFocus::PopupContent => DialogFocus::PopupContent,
         };
 
         result
@@ -524,17 +558,52 @@ impl Dialog {
             .on_event(event.relativized((self.padding + self.borders).top_left()))
         {
             EventResult::Ignored => {
-                if self.buttons.is_empty() {
+                if !self.is_popup_active && self.buttons.is_empty() {
                     EventResult::Ignored
                 } else {
                     match event {
                         Event::Key(Key::Down) | Event::Key(Key::Tab) => {
                             // Default to leftmost button when going down.
-                            self.focus = DialogFocus::Button(0);
+                            self.focus = if self.is_popup_active {
+                                DialogFocus::PopupContent
+                            } else {
+                                DialogFocus::Button(0)
+                            };
 
                             // Return the content's FocusLost trigger, but also make sure it is
                             // consumed.
                             EventResult::Consumed(None).and(self.content.on_event(Event::FocusLost))
+                        }
+                        _ => EventResult::Ignored,
+                    }
+                }
+            }
+            res => res,
+        }
+    }
+
+    // An event is received while the content is in focus
+    fn on_event_popup_content(&mut self, event: Event) -> EventResult {
+        match self
+            .popup_content
+            .on_event(event.relativized((self.padding + self.borders).top_left()))
+        {
+            EventResult::Ignored => {
+                if !self.is_popup_active && self.buttons.is_empty() {
+                    EventResult::Ignored
+                } else {
+                    match event {
+                        Event::Key(Key::Esc) => {
+                            self.remove_popup_content();
+
+                            EventResult::Consumed(None)
+                                .and(self.popup_content.on_event(Event::FocusLost))
+                        }
+                        Event::Key(Key::Up) => {
+                            self.focus = DialogFocus::Content;
+
+                            EventResult::Consumed(None)
+                                .and(self.popup_content.on_event(Event::FocusLost))
                         }
                         _ => EventResult::Ignored,
                     }
@@ -678,6 +747,26 @@ impl Dialog {
         );
     }
 
+    fn draw_popup_content(&self, printer: &Printer) {
+        if !self.is_popup_active {
+            return;
+        }
+
+        let taken = self.borders.combined() + self.padding.combined();
+
+        let inner_size = match printer.size.checked_sub(taken) {
+            Some(s) => s,
+            None => return,
+        };
+
+        self.popup_content.draw(
+            &printer
+                .offset(self.borders.top_left() + self.padding.top_left() + self.popup_offset)
+                .cropped(inner_size)
+                .focused(self.focus == DialogFocus::PopupContent),
+        );
+    }
+
     fn draw_title(&self, printer: &Printer) {
         if !self.title.is_empty() {
             let len = self.title.width();
@@ -753,6 +842,8 @@ impl View for Dialog {
 
         self.draw_content(printer, buttons_height);
 
+        self.draw_popup_content(printer);
+
         // Print the borders
         printer.print_box(Vec2::new(0, 0), printer.size, false);
 
@@ -824,6 +915,10 @@ impl View for Dialog {
         self.content
             .layout(size.saturating_sub((0, buttons_height)));
 
+        let req_size = self.popup_content.required_size(size);
+
+        self.popup_content.layout(req_size);
+
         self.invalidated = false;
     }
 
@@ -839,6 +934,7 @@ impl View for Dialog {
             DialogFocus::Content => self.on_event_content(event),
             // If we are on a button, we have more choice
             DialogFocus::Button(i) => self.on_event_button(event, i),
+            DialogFocus::PopupContent => self.on_event_popup_content(event),
         })
     }
 
@@ -875,6 +971,8 @@ impl View for Dialog {
                             }
                         }
                     }
+                    (DialogFocus::PopupContent, true) => self.content.take_focus(source),
+                    (DialogFocus::PopupContent, false) => self.popup_content.take_focus(source),
                 }
             }
             Direction::Rel(Relative::Front)
